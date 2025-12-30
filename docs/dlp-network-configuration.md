@@ -201,16 +201,10 @@ report, err := c.netChecker.GetReport(ctx, dm, &netcheck.GetReportOpts{
 
 **每次 netcheck 运行（约 20-26 秒间隔）**：
 
-1. **如果 TS_DEBUG_ALWAYS_USE_DERP=1**：
-   - STUN 请求：被阻塞的套接字，0 实际包
-   - 等待 3 秒超时
-   - HTTPS 探测：每个 DERP 区域 1 个 TLS 握手 + HTTP 请求
-   - ICMP 探测：每个 DERP 区域 1 个 ICMP echo request
-
-2. **如果使用 onlyTCP443**：
-   - STUN 请求：不发送
-   - HTTPS 探测：每个 DERP 区域 1 个 TLS 握手 + HTTP 请求
-   - ICMP 探测：不发送
+**修复后，当 TS_DEBUG_ALWAYS_USE_DERP=1 或使用 onlyTCP443**：
+- STUN 请求：完全跳过，不发送
+- ICMP 探测：完全跳过，不发送
+- HTTPS 探测：每个 DERP 区域 1 个 TLS 握手 + HTTP 请求
 
 ### DERP 连接流量
 
