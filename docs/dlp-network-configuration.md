@@ -110,20 +110,51 @@ Environment="TS_DEBUG_ALWAYS_USE_DERP=1"
 - ✅ 所有实际数据流量通过 DERP (TCP 443)
 - ✅ 不再产生 "UDP is blocked" 日志消息
 
-### 方案二：通过控制平面配置 NodeAttrOnlyTCP443
+### 方案二：通过控制平面配置 NodeAttrOnlyTCP443（推荐用于单节点配置）
 
-如果您有 Tailscale 管理员权限，可以通过控制平面配置 `NodeAttrOnlyTCP443` 能力：
+如果您希望大多数节点正常工作，仅让特定节点使用 TLS-only 模式（禁用 STUN/ICMP），这是最佳方案。
+
+#### 对于官方 Tailscale 用户
 
 1. 登录 [Tailscale Admin Console](https://login.tailscale.com/admin)
 2. 在 ACL 配置中为特定节点或用户添加 `only-tcp-443` 能力
 
-**注意**：此方法需要管理员权限，客户端无法直接设置。
+#### 对于 Headscale 用户（自建控制面板）
 
-**效果**：
+在 Headscale 的 ACL 策略文件中，为特定节点添加 `only-tcp-443` 能力：
+
+```json
+{
+  "nodeAttrs": [
+    {
+      "target": ["user1@example.com"],
+      "attr": ["only-tcp-443"]
+    },
+    {
+      "target": ["tag:dlp-restricted"],
+      "attr": ["only-tcp-443"]
+    }
+  ]
+}
+```
+
+**配置方式**：
+- `target`: 可以是用户邮箱、标签（如 `tag:dlp-restricted`）
+- `attr`: 设置为 `["only-tcp-443"]`
+
+**注意**：Headscale 的 ACL 策略通过 JSON 文件配置（通常位于 `/etc/headscale/acl.json`），需要在 `config.yaml` 中设置 `policy.path` 指向该文件。
+
+**效果**（仅对配置了该属性的节点生效）：
 - ✅ 完全禁用 UDP STUN 探测
 - ✅ 完全禁用 ICMP 探测
-- ✅ 仅使用 TCP 443 进行 DERP 延迟测量
-- ✅ 所有流量通过 DERP (TCP 443)
+- ✅ 仅使用 TCP/HTTPS 进行 DERP 延迟测量
+- ✅ 所有流量通过 DERP
+- ✅ 其他节点正常使用 P2P/STUN/ICMP
+
+**优势**：
+- 无需在客户端设置环境变量
+- 可以精确控制哪些节点需要 TLS-only 模式
+- 其他节点不受影响，可以正常使用直连和 NAT 穿透
 
 ### 方案三：自定义 DERP + 禁用 netcheck 外部网络
 
@@ -425,7 +456,30 @@ A: **分析原因**：
 
 对于 DLP 环境，推荐配置：
 
-### 公共 Tailscale 用户
+### 场景一：仅特定节点需要 TLS-only（推荐）
+
+如果您使用 Headscale 且只想让某些节点禁用 STUN/ICMP，其他节点正常使用：
+
+**在 Headscale ACL 中配置**：
+```json
+{
+  "nodeAttrs": [
+    {
+      "target": ["tag:dlp-node"],
+      "attr": ["only-tcp-443"]
+    }
+  ]
+}
+```
+
+然后给需要 TLS-only 的节点添加 `dlp-node` 标签。
+
+**效果**：
+- ✅ 带 `dlp-node` 标签的节点：禁用 STUN/ICMP，仅 TLS
+- ✅ 其他节点：正常使用 P2P、STUN、ICMP
+- ✅ 无需修改客户端配置
+
+### 场景二：所有节点都需要 TLS-only
 
 **首选方案**：设置环境变量 `TS_DEBUG_ALWAYS_USE_DERP=1`
 
@@ -436,15 +490,25 @@ A: **分析原因**：
 - ✅ 仅使用 HTTPS (TCP 443) 测量 DERP 延迟
 - ✅ 所有数据流量通过 DERP 中继
 
-**替代方案**：通过控制平面配置 `NodeAttrOnlyTCP443`（需要管理员权限）
-
-### 自建控制面板和 DERP 用户
+### 场景三：自建 DERP 使用非标准端口
 
 **推荐配置组合**：
 
-1. **客户端**：设置 `TS_DEBUG_ALWAYS_USE_DERP=1`
+1. **控制面板 ACL**（针对特定节点）：
+   ```json
+   {
+     "nodeAttrs": [
+       {
+         "target": ["tag:dlp-restricted"],
+         "attr": ["only-tcp-443"]
+       }
+     ]
+   }
+   ```
 
 2. **DERP Map**（通过控制面板下发）：
+   
+   **如果所有节点都禁用 STUN**：
    ```json
    {
      "Regions": {
@@ -461,14 +525,33 @@ A: **分析原因**：
    }
    ```
 
+   **如果部分节点需要正常使用 STUN**（设置有效的 STUN 端口）：
+   ```json
+   {
+     "Regions": {
+       "900": {
+         "RegionID": 900,
+         "Nodes": [{
+           "HostName": "your-derp.example.com",
+           "DERPPort": 7080,
+           "STUNPort": 7478
+         }]
+       }
+     },
+     "OmitDefaultRegions": true
+   }
+   ```
+
+**注意**：`STUNPort` 是 DERP 服务器级别的配置，影响所有节点。如果设置为 `-1`，所有节点都无法使用 STUN。`only-tcp-443` 节点属性仅控制客户端是否尝试发送 STUN/ICMP 请求。
+
 这将：
 - ✅ 所有流量通过您的私有 DERP（自定义端口如 7080）
-- ✅ 无 UDP 外发流量（STUN 端口可关闭）
-- ✅ 无 ICMP 外发流量
+- ✅ 带 `dlp-restricted` 标签的节点：禁用 UDP/ICMP 探测
+- ✅ 其他节点：根据 DERP 的 STUNPort 配置决定是否可用 STUN
 - ✅ 不连接公共 Tailscale 服务器
-- ✅ 不产生 "UDP is blocked" 日志
+- ✅ 配置了 `only-tcp-443` 的节点不产生 "UDP is blocked" 日志
 
-所有方案都确保实际数据流量仅通过 DERP 中继，不建立点对点连接。
+所有方案都确保配置了 TLS-only 属性的节点数据流量仅通过 DERP 中继，不建立点对点连接。
 
 ---
 
