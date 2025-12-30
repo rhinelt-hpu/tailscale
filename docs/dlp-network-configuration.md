@@ -144,6 +144,124 @@ Environment="TS_DEBUG_ALWAYS_USE_DERP=1"
 
 **注意**：Headscale 的 ACL 策略通过 JSON 文件配置（通常位于 `/etc/headscale/acl.json`），需要在 `config.yaml` 中设置 `policy.path` 指向该文件。
 
+#### Headscale 命令行配置步骤
+
+**步骤 1：为节点添加标签**
+
+首先查看现有节点列表：
+```bash
+headscale nodes list
+```
+
+为特定节点添加 `dlp-restricted` 标签：
+```bash
+# 使用节点 ID 添加标签
+headscale nodes tag -i <NODE_ID> -t tag:dlp-restricted
+
+# 或使用节点名称
+headscale nodes tag -n <NODE_NAME> -t tag:dlp-restricted
+```
+
+**步骤 2：配置 ACL 策略文件**
+
+编辑 ACL 策略文件（通常位于 `/etc/headscale/acl.json`）：
+```bash
+sudo nano /etc/headscale/acl.json
+```
+
+添加或修改 `nodeAttrs` 部分：
+```json
+{
+  "nodeAttrs": [
+    {
+      "target": ["tag:dlp-restricted"],
+      "attr": ["only-tcp-443"]
+    }
+  ],
+  "acls": [
+    {"action": "accept", "src": ["*"], "dst": ["*:*"]}
+  ]
+}
+```
+
+**步骤 3：重新加载 Headscale 配置**
+
+```bash
+# 方法一：重启 Headscale 服务
+sudo systemctl restart headscale
+
+# 方法二：如果支持热重载（较新版本）
+headscale policy reload
+```
+
+**步骤 4：在客户端触发配置更新**
+
+在需要应用 TLS-only 的节点上执行：
+```bash
+# 断开并重新连接以获取新配置
+tailscale down
+tailscale up
+```
+
+#### 验证配置是否生效
+
+**方法 1：检查 tailscale status 输出**
+
+在配置了 TLS-only 的节点上运行：
+```bash
+tailscale status
+```
+
+观察与其他节点的连接类型，应该显示 `relay` 而不是 `direct`。
+
+**方法 2：检查 netcheck 报告**
+
+```bash
+tailscale netcheck
+```
+
+在 TLS-only 节点上，输出应该显示：
+- UDP 相关项可能显示为 `blocked` 或不可用
+- 仅通过 DERP 中继连接
+
+**方法 3：查看详细日志**
+
+```bash
+# 查看 tailscaled 日志
+journalctl -u tailscaled -f
+
+# 或在 Windows 上查看事件日志
+```
+
+如果配置正确，不应该看到 "UDP is blocked, trying HTTPS" 或 STUN 相关的错误消息。
+
+**方法 4：使用 tailscale debug 命令**
+
+```bash
+# 查看当前节点的能力（capabilities）
+tailscale debug prefs
+
+# 查看网络状态
+tailscale debug netmap
+```
+
+**方法 5：网络抓包验证**
+
+使用 tcpdump 或 Wireshark 确认没有 UDP 外发流量：
+```bash
+# 监控 UDP 流量（应该几乎没有外发 UDP）
+sudo tcpdump -i any udp and not port 53
+
+# 监控 STUN 端口流量（应该没有）
+sudo tcpdump -i any udp port 3478
+```
+
+#### 对比验证
+
+在**普通节点**上执行 `tailscale netcheck`，应该看到 STUN 和 UDP 测试结果。
+
+在**TLS-only 节点**上执行相同命令，应该看到这些测试被跳过或显示为不可用。
+
 **效果**（仅对配置了该属性的节点生效）：
 - ✅ 完全禁用 UDP STUN 探测
 - ✅ 完全禁用 ICMP 探测
