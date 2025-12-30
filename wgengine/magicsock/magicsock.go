@@ -1063,7 +1063,7 @@ func (c *Conn) updateNetInfo(ctx context.Context) (*netcheck.Report, error) {
 		// the exact same state in two different places.
 		GetLastDERPActivity: c.health.GetDERPRegionReceivedTime,
 		// When TS_DEBUG_ALWAYS_USE_DERP is set, UDP sockets are disabled,
-		// so we should skip STUN probing and use only TCP 443 for netcheck.
+		// so we should skip STUN and ICMP probing and use only TCP 443 for netcheck.
 		OnlyTCP443: c.onlyTCP443.Load() || debugAlwaysDERP(),
 	})
 	if err != nil {
@@ -1599,7 +1599,7 @@ func (c *Conn) maybeRebindOnError(err error) {
 // It returns the number of bytes sent along with any error encountered. It
 // returns errors.ErrUnsupported if the client is explicitly configured to only
 // send data over TCP port 443, we're running on wasm, or TS_DEBUG_ALWAYS_USE_DERP
-// is set (which disables UDP sockets for all peer communication).
+// is set (which disables UDP sockets for both peer communication and network probing).
 func (c *Conn) sendUDPNetcheck(b []byte, addr netip.AddrPort) (int, error) {
 	if c.onlyTCP443.Load() || runtime.GOOS == "js" || debugAlwaysDERP() {
 		return 0, errors.ErrUnsupported
