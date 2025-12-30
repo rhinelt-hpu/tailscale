@@ -110,15 +110,14 @@ Environment="TS_DEBUG_ALWAYS_USE_DERP=1"
 - ✅ 所有实际数据流量通过 DERP (TCP 443)
 - ✅ 不再产生 "UDP is blocked" 日志消息
 
-### 方案二：使用 tailscale set --onlytcp443
+### 方案二：通过控制平面配置 NodeAttrOnlyTCP443
 
-如果您的环境只允许 TCP 443 流量：
+如果您有 Tailscale 管理员权限，可以通过控制平面配置 `NodeAttrOnlyTCP443` 能力：
 
-```bash
-tailscale set --onlytcp443
-```
+1. 登录 [Tailscale Admin Console](https://login.tailscale.com/admin)
+2. 在 ACL 配置中为特定节点或用户添加 `only-tcp-443` 能力
 
-或在环境中设置控制平面响应以启用此功能。
+**注意**：此方法需要管理员权限，客户端无法直接设置。
 
 **效果**：
 - ✅ 完全禁用 UDP STUN 探测
@@ -255,7 +254,7 @@ A: 探测包本身不包含用户数据，仅用于测量网络延迟。HTTPS �
 - Tailscale 客户端的存在
 - TLS ClientHello 中的 SNI
 
-### Q: TS_DEBUG_ALWAYS_USE_DERP 和 --onlytcp443 有什么区别？
+### Q: TS_DEBUG_ALWAYS_USE_DERP 和 NodeAttrOnlyTCP443 有什么区别？
 
 A: 修复后，两者在 netcheck 行为上是等效的：
 - 都跳过 STUN (UDP) 探测
@@ -263,7 +262,9 @@ A: 修复后，两者在 netcheck 行为上是等效的：
 - 都仅使用 HTTPS 测量 DERP 延迟
 - 都强制所有流量通过 DERP
 
-主要区别在于设置方式：`TS_DEBUG_ALWAYS_USE_DERP` 是环境变量，而 `--onlytcp443` 是通过 tailscale CLI 或控制平面设置。
+主要区别在于设置方式：
+- `TS_DEBUG_ALWAYS_USE_DERP`：环境变量，客户端可直接设置
+- `NodeAttrOnlyTCP443`：需要通过控制平面（admin console）配置，客户端无法直接设置
 
 ## 总结
 
@@ -278,7 +279,7 @@ A: 修复后，两者在 netcheck 行为上是等效的：
 - ✅ 仅使用 HTTPS (TCP 443) 测量 DERP 延迟
 - ✅ 所有数据流量通过 DERP 中继
 
-**替代方案**：使用 `tailscale set --onlytcp443`（效果相同）
+**替代方案**：通过控制平面配置 `NodeAttrOnlyTCP443`（需要管理员权限）
 
 所有方案都确保实际数据流量仅通过 DERP 中继，不建立点对点连接。
 
