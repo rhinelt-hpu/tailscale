@@ -110,18 +110,14 @@ Environment="TS_DEBUG_ALWAYS_USE_DERP=1"
 - ✅ 所有实际数据流量通过 DERP (TCP 443)
 - ✅ 不再产生 "UDP is blocked" 日志消息
 
-### 方案二：通过控制平面配置 NodeAttrOnlyTCP443（推荐用于单节点配置）
+### 方案二：通过控制平面配置 NodeAttrOnlyTCP443
 
-如果您希望大多数节点正常工作，仅让特定节点使用 TLS-only 模式（禁用 STUN/ICMP），这是最佳方案。
+如果您希望大多数节点正常工作，仅让特定节点使用 TLS-only 模式（禁用 STUN/ICMP），可以通过控制平面配置。
 
 #### 对于官方 Tailscale 用户
 
 1. 登录 [Tailscale Admin Console](https://login.tailscale.com/admin)
 2. 在 ACL 配置中为特定节点或用户添加 `only-tcp-443` 能力
-
-#### 对于 Headscale 用户（自建控制面板）
-
-在 Headscale 的 ACL 策略文件中，为特定节点添加 `only-tcp-443` 能力：
 
 ```json
 {
@@ -138,69 +134,80 @@ Environment="TS_DEBUG_ALWAYS_USE_DERP=1"
 }
 ```
 
-**配置方式**：
-- `target`: 可以是用户邮箱、标签（如 `tag:dlp-restricted`）
-- `attr`: 设置为 `["only-tcp-443"]`
+#### 对于 Headscale 用户（自建控制面板）
 
-**注意**：Headscale 的 ACL 策略通过 JSON 文件配置（通常位于 `/etc/headscale/acl.json`），需要在 `config.yaml` 中设置 `policy.path` 指向该文件。
+> ⚠️ **重要提示**：截至 Headscale v0.27.0，`nodeAttrs` 功能**尚未实现**。
+> 运行 `headscale policy check -f policy.json` 会报错：`unknown field "nodeAttrs"`
+>
+> 如果您使用 Headscale，请使用下面的**方案二-B：客户端环境变量方案**。
 
-#### Headscale 命令行配置步骤
+### 方案二-B：Headscale 用户的替代方案（客户端环境变量）
 
-**步骤 1：为节点添加标签**
+由于 Headscale 目前不支持 `nodeAttrs`，对于需要单节点 TLS-only 的 Headscale 用户，推荐在**特定客户端**上设置环境变量：
 
-首先查看现有节点列表：
-```bash
-headscale nodes list
-```
+#### Linux (systemd)
 
-为特定节点添加 `dlp-restricted` 标签：
-```bash
-# 使用节点 ID 添加标签
-headscale nodes tag -i <NODE_ID> -t tag:dlp-restricted
-
-# 或使用节点名称
-headscale nodes tag -n <NODE_NAME> -t tag:dlp-restricted
-```
-
-**步骤 2：配置 ACL 策略文件**
-
-编辑 ACL 策略文件（通常位于 `/etc/headscale/acl.json`）：
-```bash
-sudo nano /etc/headscale/acl.json
-```
-
-添加或修改 `nodeAttrs` 部分：
-```json
-{
-  "nodeAttrs": [
-    {
-      "target": ["tag:dlp-restricted"],
-      "attr": ["only-tcp-443"]
-    }
-  ],
-  "acls": [
-    {"action": "accept", "src": ["*"], "dst": ["*:*"]}
-  ]
-}
-```
-
-**步骤 3：重新加载 Headscale 配置**
+在需要 TLS-only 的节点上，编辑 tailscaled 服务配置：
 
 ```bash
-# 方法一：重启 Headscale 服务
-sudo systemctl restart headscale
-
-# 方法二：如果支持热重载（较新版本）
-headscale policy reload
+# 创建 systemd override 文件
+sudo mkdir -p /etc/systemd/system/tailscaled.service.d/
+sudo nano /etc/systemd/system/tailscaled.service.d/override.conf
 ```
 
-**步骤 4：在客户端触发配置更新**
+添加以下内容：
+```ini
+[Service]
+Environment="TS_DEBUG_ALWAYS_USE_DERP=1"
+```
 
-在需要应用 TLS-only 的节点上执行：
+重新加载并重启服务：
 ```bash
-# 断开并重新连接以获取新配置
-tailscale down
-tailscale up
+sudo systemctl daemon-reload
+sudo systemctl restart tailscaled
+```
+
+#### Windows
+
+在需要 TLS-only 的 Windows 节点上：
+
+1. 打开"系统属性" → "高级" → "环境变量"
+2. 在"系统变量"中添加：
+   - 变量名：`TS_DEBUG_ALWAYS_USE_DERP`
+   - 变量值：`1`
+3. 重启 Tailscale 服务
+
+或使用命令行：
+```powershell
+[System.Environment]::SetEnvironmentVariable("TS_DEBUG_ALWAYS_USE_DERP", "1", "Machine")
+Restart-Service Tailscale
+```
+
+#### macOS
+
+在需要 TLS-only 的 macOS 节点上：
+
+```bash
+# 停止 Tailscale
+sudo launchctl stop com.tailscale.tailscaled
+
+# 设置环境变量并启动
+sudo launchctl setenv TS_DEBUG_ALWAYS_USE_DERP 1
+sudo launchctl start com.tailscale.tailscaled
+```
+
+或者创建启动配置：
+```bash
+sudo nano /Library/LaunchDaemons/com.tailscale.tailscaled.plist
+```
+
+在 `<dict>` 中添加：
+```xml
+<key>EnvironmentVariables</key>
+<dict>
+    <key>TS_DEBUG_ALWAYS_USE_DERP</key>
+    <string>1</string>
+</dict>
 ```
 
 #### 验证配置是否生效
@@ -229,23 +236,11 @@ tailscale netcheck
 ```bash
 # 查看 tailscaled 日志
 journalctl -u tailscaled -f
-
-# 或在 Windows 上查看事件日志
 ```
 
 如果配置正确，不应该看到 "UDP is blocked, trying HTTPS" 或 STUN 相关的错误消息。
 
-**方法 4：使用 tailscale debug 命令**
-
-```bash
-# 查看当前节点的能力（capabilities）
-tailscale debug prefs
-
-# 查看网络状态
-tailscale debug netmap
-```
-
-**方法 5：网络抓包验证**
+**方法 4：网络抓包验证**
 
 使用 tcpdump 或 Wireshark 确认没有 UDP 外发流量：
 ```bash
@@ -262,15 +257,15 @@ sudo tcpdump -i any udp port 3478
 
 在**TLS-only 节点**上执行相同命令，应该看到这些测试被跳过或显示为不可用。
 
-**效果**（仅对配置了该属性的节点生效）：
+**效果**（仅对配置了环境变量的节点生效）：
 - ✅ 完全禁用 UDP STUN 探测
 - ✅ 完全禁用 ICMP 探测
 - ✅ 仅使用 TCP/HTTPS 进行 DERP 延迟测量
 - ✅ 所有流量通过 DERP
-- ✅ 其他节点正常使用 P2P/STUN/ICMP
+- ✅ 其他节点正常使用 P2P/STUN/ICMP（因为它们没有设置此环境变量）
 
 **优势**：
-- 无需在客户端设置环境变量
+- 适用于 Headscale（不依赖 `nodeAttrs` 功能）
 - 可以精确控制哪些节点需要 TLS-only 模式
 - 其他节点不受影响，可以正常使用直连和 NAT 穿透
 
@@ -574,11 +569,37 @@ A: **分析原因**：
 
 对于 DLP 环境，推荐配置：
 
-### 场景一：仅特定节点需要 TLS-only（推荐）
+### 场景一：Headscale 用户 - 仅特定节点需要 TLS-only（推荐）
 
-如果您使用 Headscale 且只想让某些节点禁用 STUN/ICMP，其他节点正常使用：
+> ⚠️ **注意**：Headscale v0.27.0 及以下版本**不支持** `nodeAttrs` 功能。
+> 请使用**客户端环境变量方案**。
 
-**在 Headscale ACL 中配置**：
+**在需要 TLS-only 的特定节点上设置环境变量**：
+
+```bash
+# Linux (systemd)
+sudo mkdir -p /etc/systemd/system/tailscaled.service.d/
+echo -e "[Service]\nEnvironment=\"TS_DEBUG_ALWAYS_USE_DERP=1\"" | sudo tee /etc/systemd/system/tailscaled.service.d/override.conf
+sudo systemctl daemon-reload
+sudo systemctl restart tailscaled
+```
+
+**效果**：
+- ✅ 设置了环境变量的节点：禁用 STUN/ICMP，仅 TLS
+- ✅ 其他节点：正常使用 P2P、STUN、ICMP
+- ✅ 适用于 Headscale
+
+**验证**：
+```bash
+# 在 TLS-only 节点上
+tailscale netcheck  # STUN 测试应被跳过
+sudo tcpdump -i any udp port 3478  # 应无流量
+```
+
+### 场景二：官方 Tailscale 用户 - 仅特定节点需要 TLS-only
+
+官方 Tailscale 支持 `nodeAttrs`，可在 ACL 中配置：
+
 ```json
 {
   "nodeAttrs": [
@@ -590,16 +611,9 @@ A: **分析原因**：
 }
 ```
 
-然后给需要 TLS-only 的节点添加 `dlp-node` 标签。
+### 场景三：所有节点都需要 TLS-only
 
-**效果**：
-- ✅ 带 `dlp-node` 标签的节点：禁用 STUN/ICMP，仅 TLS
-- ✅ 其他节点：正常使用 P2P、STUN、ICMP
-- ✅ 无需修改客户端配置
-
-### 场景二：所有节点都需要 TLS-only
-
-**首选方案**：设置环境变量 `TS_DEBUG_ALWAYS_USE_DERP=1`
+在所有节点上设置环境变量 `TS_DEBUG_ALWAYS_USE_DERP=1`
 
 这将：
 - ✅ 禁用点对点 UDP 连接
@@ -608,71 +622,49 @@ A: **分析原因**：
 - ✅ 仅使用 HTTPS (TCP 443) 测量 DERP 延迟
 - ✅ 所有数据流量通过 DERP 中继
 
-### 场景三：自建 DERP 使用非标准端口
+### 场景四：自建 DERP 使用非标准端口
 
-**推荐配置组合**：
+**DERP Map 配置**（通过控制面板下发）：
 
-1. **控制面板 ACL**（针对特定节点）：
-   ```json
-   {
-     "nodeAttrs": [
-       {
-         "target": ["tag:dlp-restricted"],
-         "attr": ["only-tcp-443"]
-       }
-     ]
-   }
-   ```
+```json
+{
+  "Regions": {
+    "900": {
+      "RegionID": 900,
+      "Nodes": [{
+        "HostName": "your-derp.example.com",
+        "DERPPort": 7080,
+        "STUNPort": -1
+      }]
+    }
+  },
+  "OmitDefaultRegions": true
+}
+```
 
-2. **DERP Map**（通过控制面板下发）：
-   
-   **如果所有节点都禁用 STUN**：
-   ```json
-   {
-     "Regions": {
-       "900": {
-         "RegionID": 900,
-         "Nodes": [{
-           "HostName": "your-derp.example.com",
-           "DERPPort": 7080,
-           "STUNPort": -1
-         }]
-       }
-     },
-     "OmitDefaultRegions": true
-   }
-   ```
+设置 `STUNPort: -1` 禁用所有 STUN，或设置有效端口（如 `7478`）允许非 TLS-only 节点使用 STUN。
 
-   **如果部分节点需要正常使用 STUN**（设置有效的 STUN 端口）：
-   ```json
-   {
-     "Regions": {
-       "900": {
-         "RegionID": 900,
-         "Nodes": [{
-           "HostName": "your-derp.example.com",
-           "DERPPort": 7080,
-           "STUNPort": 7478
-         }]
-       }
-     },
-     "OmitDefaultRegions": true
-   }
-   ```
+**在特定节点上设置 TLS-only**：
 
-**注意**：`STUNPort` 是 DERP 服务器级别的配置，影响所有节点。如果设置为 `-1`，所有节点都无法使用 STUN。`only-tcp-443` 节点属性仅控制客户端是否尝试发送 STUN/ICMP 请求。
+```bash
+# 仅在需要 TLS-only 的节点上执行
+sudo mkdir -p /etc/systemd/system/tailscaled.service.d/
+echo -e "[Service]\nEnvironment=\"TS_DEBUG_ALWAYS_USE_DERP=1\"" | sudo tee /etc/systemd/system/tailscaled.service.d/override.conf
+sudo systemctl daemon-reload
+sudo systemctl restart tailscaled
+```
 
-这将：
+**效果**：
 - ✅ 所有流量通过您的私有 DERP（自定义端口如 7080）
-- ✅ 带 `dlp-restricted` 标签的节点：禁用 UDP/ICMP 探测
+- ✅ 设置了环境变量的节点：禁用 UDP/ICMP 探测
 - ✅ 其他节点：根据 DERP 的 STUNPort 配置决定是否可用 STUN
 - ✅ 不连接公共 Tailscale 服务器
-- ✅ 配置了 `only-tcp-443` 的节点不产生 "UDP is blocked" 日志
+- ✅ 配置了 TLS-only 的节点不产生 "UDP is blocked" 日志
 
-所有方案都确保配置了 TLS-only 属性的节点数据流量仅通过 DERP 中继，不建立点对点连接。
+所有方案都确保配置了 TLS-only 的节点数据流量仅通过 DERP 中继，不建立点对点连接。
 
 ---
 
 *文档版本：基于 Tailscale 源代码分析*
 *最后更新：2024*
-*注：包含 TS_DEBUG_ALWAYS_USE_DERP netcheck 行为修复*
+*注：包含 TS_DEBUG_ALWAYS_USE_DERP netcheck 行为修复；Headscale v0.27.0 不支持 nodeAttrs*
