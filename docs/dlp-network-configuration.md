@@ -112,18 +112,162 @@ Environment="TS_DEBUG_ALWAYS_USE_DERP=1"
 
 ### 方案二：通过控制平面配置 NodeAttrOnlyTCP443
 
-如果您有 Tailscale 管理员权限，可以通过控制平面配置 `NodeAttrOnlyTCP443` 能力：
+如果您希望大多数节点正常工作，仅让特定节点使用 TLS-only 模式（禁用 STUN/ICMP），可以通过控制平面配置。
+
+#### 对于官方 Tailscale 用户
 
 1. 登录 [Tailscale Admin Console](https://login.tailscale.com/admin)
 2. 在 ACL 配置中为特定节点或用户添加 `only-tcp-443` 能力
 
-**注意**：此方法需要管理员权限，客户端无法直接设置。
+```json
+{
+  "nodeAttrs": [
+    {
+      "target": ["user1@example.com"],
+      "attr": ["only-tcp-443"]
+    },
+    {
+      "target": ["tag:dlp-restricted"],
+      "attr": ["only-tcp-443"]
+    }
+  ]
+}
+```
 
-**效果**：
+#### 对于 Headscale 用户（自建控制面板）
+
+> ⚠️ **重要提示**：截至 Headscale v0.27.0，`nodeAttrs` 功能**尚未实现**。
+> 运行 `headscale policy check -f policy.json` 会报错：`unknown field "nodeAttrs"`
+>
+> 如果您使用 Headscale，请使用下面的**方案二-B：客户端环境变量方案**。
+
+### 方案二-B：Headscale 用户的替代方案（客户端环境变量）
+
+由于 Headscale 目前不支持 `nodeAttrs`，对于需要单节点 TLS-only 的 Headscale 用户，推荐在**特定客户端**上设置环境变量：
+
+#### Linux (systemd)
+
+在需要 TLS-only 的节点上，编辑 tailscaled 服务配置：
+
+```bash
+# 创建 systemd override 文件
+sudo mkdir -p /etc/systemd/system/tailscaled.service.d/
+sudo nano /etc/systemd/system/tailscaled.service.d/override.conf
+```
+
+添加以下内容：
+```ini
+[Service]
+Environment="TS_DEBUG_ALWAYS_USE_DERP=1"
+```
+
+重新加载并重启服务：
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart tailscaled
+```
+
+#### Windows
+
+在需要 TLS-only 的 Windows 节点上：
+
+1. 打开"系统属性" → "高级" → "环境变量"
+2. 在"系统变量"中添加：
+   - 变量名：`TS_DEBUG_ALWAYS_USE_DERP`
+   - 变量值：`1`
+3. 重启 Tailscale 服务
+
+或使用命令行：
+```powershell
+[System.Environment]::SetEnvironmentVariable("TS_DEBUG_ALWAYS_USE_DERP", "1", "Machine")
+Restart-Service Tailscale
+```
+
+#### macOS
+
+在需要 TLS-only 的 macOS 节点上：
+
+```bash
+# 停止 Tailscale
+sudo launchctl stop com.tailscale.tailscaled
+
+# 设置环境变量并启动
+sudo launchctl setenv TS_DEBUG_ALWAYS_USE_DERP 1
+sudo launchctl start com.tailscale.tailscaled
+```
+
+或者创建启动配置：
+```bash
+sudo nano /Library/LaunchDaemons/com.tailscale.tailscaled.plist
+```
+
+在 `<dict>` 中添加：
+```xml
+<key>EnvironmentVariables</key>
+<dict>
+    <key>TS_DEBUG_ALWAYS_USE_DERP</key>
+    <string>1</string>
+</dict>
+```
+
+#### 验证配置是否生效
+
+**方法 1：检查 tailscale status 输出**
+
+在配置了 TLS-only 的节点上运行：
+```bash
+tailscale status
+```
+
+观察与其他节点的连接类型，应该显示 `relay` 而不是 `direct`。
+
+**方法 2：检查 netcheck 报告**
+
+```bash
+tailscale netcheck
+```
+
+在 TLS-only 节点上，输出应该显示：
+- UDP 相关项可能显示为 `blocked` 或不可用
+- 仅通过 DERP 中继连接
+
+**方法 3：查看详细日志**
+
+```bash
+# 查看 tailscaled 日志
+journalctl -u tailscaled -f
+```
+
+如果配置正确，不应该看到 "UDP is blocked, trying HTTPS" 或 STUN 相关的错误消息。
+
+**方法 4：网络抓包验证**
+
+使用 tcpdump 或 Wireshark 确认没有 UDP 外发流量：
+```bash
+# 监控 UDP 流量（应该几乎没有外发 UDP）
+sudo tcpdump -i any udp and not port 53
+
+# 监控 STUN 端口流量（应该没有）
+sudo tcpdump -i any udp port 3478
+```
+
+#### 对比验证
+
+在**普通节点**上执行 `tailscale netcheck`，应该看到 STUN 和 UDP 测试结果。
+
+在**TLS-only 节点**上执行相同命令，应该看到这些测试被跳过或显示为不可用。
+
+**效果**（仅对配置了环境变量的节点生效）：
 - ✅ 完全禁用 UDP STUN 探测
 - ✅ 完全禁用 ICMP 探测
-- ✅ 仅使用 TCP 443 进行 DERP 延迟测量
-- ✅ 所有流量通过 DERP (TCP 443)
+- ✅ 仅使用 TCP/HTTPS 进行 DERP 延迟测量
+- ✅ 所有流量通过 DERP
+- ✅ 其他节点正常使用 P2P/STUN/ICMP（因为它们没有设置此环境变量）
+
+**优势**：
+- 适用于 Headscale（不依赖 `nodeAttrs` 功能）
+- 可以精确控制哪些节点需要 TLS-only 模式
+- 其他节点不受影响，可以正常使用直连和 NAT 穿透
 
 ### 方案三：自定义 DERP + 禁用 netcheck 外部网络
 
@@ -132,6 +276,114 @@ Environment="TS_DEBUG_ALWAYS_USE_DERP=1"
 1. 部署私有 DERP 服务器
 2. 配置 DERP Map 仅包含私有服务器
 3. 禁用到公共 DERP 的连接
+
+### 方案四：自建控制面板和 DERP 服务器（非标准端口）
+
+如果您使用自建的控制面板和 DERP 服务器，且使用非标准端口（如控制面板 7081，DERP 7080/7478），需要特别配置。
+
+#### DERP 服务器端口说明
+
+| 端口 | 用途 | 协议 | 说明 |
+|------|------|------|------|
+| 443（默认） | DERP HTTPS | TCP | 主要数据中继端口 |
+| 3478（默认） | STUN | UDP | NAT 穿透探测端口 |
+| 80（可选） | DERP HTTP | TCP | 备用端口（需显式启用） |
+
+#### 自定义 DERP 端口配置
+
+在 DERP Map 配置中，可以为每个节点设置自定义端口：
+
+```json
+{
+  "Regions": {
+    "900": {
+      "RegionID": 900,
+      "RegionCode": "custom",
+      "RegionName": "Custom DERP",
+      "Nodes": [{
+        "Name": "900a",
+        "RegionID": 900,
+        "HostName": "your-derp.example.com",
+        "DERPPort": 7080,
+        "STUNPort": -1
+      }]
+    }
+  },
+  "OmitDefaultRegions": true
+}
+```
+
+**关键配置项**：
+- `DERPPort`: 自定义 DERP HTTPS 端口（默认 443，您可设置为 7080）
+- `STUNPort`: 设置为 `-1` 可完全禁用该节点的 STUN 探测
+- `OmitDefaultRegions`: 设置为 `true` 可禁用公共 DERP 区域
+
+#### 禁用 STUN 的重要性
+
+当 `STUNPort` 设置为 `-1` 时：
+- 该 DERP 节点不会接收 STUN 探测请求
+- netcheck 不会尝试向该节点发送 UDP STUN 包
+- 延迟测量仅通过 HTTPS 进行
+
+这对于 DLP 环境非常重要，因为它可以确保：
+1. 不产生任何 UDP 外发流量
+2. 所有探测流量都通过 TCP（可被防火墙更精确控制）
+3. 减少被 DLP 系统误报的风险
+
+#### 完整配置示例
+
+假设您的环境：
+- 自建控制面板：`headscale.example.com:7081`
+- 自建 DERP：`derp.example.com:7080`（HTTPS）
+- 不需要 STUN：端口 7478 可以关闭
+
+**客户端环境变量配置**：
+```bash
+# 强制使用 DERP（禁用 P2P UDP）
+TS_DEBUG_ALWAYS_USE_DERP=1
+
+# 如果需要额外的调试信息
+TS_DEBUG_DERP=1
+TS_DEBUG_NETCHECK=1
+```
+
+**DERP Map 配置**（通过控制面板下发）：
+```json
+{
+  "Regions": {
+    "900": {
+      "RegionID": 900,
+      "RegionCode": "private",
+      "RegionName": "Private DERP",
+      "Nodes": [{
+        "Name": "900a",
+        "RegionID": 900,
+        "HostName": "derp.example.com",
+        "DERPPort": 7080,
+        "STUNPort": -1
+      }]
+    }
+  },
+  "OmitDefaultRegions": true
+}
+```
+
+**效果**：
+- ✅ 所有流量通过 `derp.example.com:7080` (TCP)
+- ✅ 无 UDP STUN 探测（端口 7478 可关闭）
+- ✅ 无 ICMP 探测
+- ✅ 延迟测量仅通过 HTTPS 到端口 7080
+- ✅ 不连接任何公共 DERP 服务器
+
+#### 注意：关于 onlyTCP443 功能与自定义端口
+
+`onlyTCP443` 功能的命名可能造成误解（此命名是为了向后兼容）。实际上，当启用此功能或 `TS_DEBUG_ALWAYS_USE_DERP=1` 时：
+
+1. **行为**：跳过 STUN (UDP) 和 ICMP 探测，仅使用 HTTPS 测量延迟
+2. **端口**：HTTPS 探测会连接到 DERP 节点配置的 `DERPPort`，不一定是 443
+3. **兼容性**：完全兼容自定义 DERP 端口（如 7080）
+
+因此，即使您的 DERP 服务器运行在 7080 端口，`onlyTCP443` 模式仍然有效，它会通过 TCP 连接到 7080 端口进行 HTTPS 延迟测量，而不是强制使用 443 端口。
 
 ## 代码原理解释
 
@@ -266,11 +518,102 @@ A: 修复后，两者在 netcheck 行为上是等效的：
 - `TS_DEBUG_ALWAYS_USE_DERP`：环境变量，客户端可直接设置
 - `NodeAttrOnlyTCP443`：需要通过控制平面（admin console）配置，客户端无法直接设置
 
+### Q: 我使用自建 DERP 在非 443 端口，onlyTCP443 还能用吗？
+
+A: **可以**。`onlyTCP443` 的名称具有误导性，它实际上意味着"仅使用 TCP/HTTPS 进行延迟测量，跳过 UDP 和 ICMP"。当启用此模式时：
+
+1. HTTPS 延迟测量会连接到每个 DERP 节点配置的 `DERPPort`（可以是任何端口，如 7080）
+2. 跳过所有 UDP STUN 探测（不管 `STUNPort` 配置为什么）
+3. 跳过所有 ICMP 探测
+
+因此，如果您的 DERP 服务器配置为 `DERPPort: 7080`，延迟测量会通过 TCP 连接到 7080 端口。
+
+### Q: 如何完全禁止 netcheck 产生的网络流量？
+
+A: 完全禁用 netcheck 不推荐，因为它用于选择最佳 DERP 服务器。但您可以最小化流量：
+
+1. **设置 `TS_DEBUG_ALWAYS_USE_DERP=1`**：跳过 UDP/ICMP，仅使用 HTTPS
+2. **在 DERP Map 中设置 `STUNPort: -1`**：确保不发送 STUN 请求
+3. **只配置一个 DERP 区域**：减少 HTTPS 探测数量
+4. **设置 `OmitDefaultRegions: true`**：不连接公共 DERP
+
+这样，周期性流量仅为：
+- 到您私有 DERP 的 HTTPS 延迟测量（每 20-26 秒一次 TLS 握手）
+- DERP 连接心跳（每 60 秒一次）
+
+### Q: "UDP is blocked" 日志会导致大量发包吗？
+
+A: **分析原因**：
+
+当看到这些日志时，说明 netcheck 执行了以下流程：
+1. 尝试发送 STUN 探测（UDP）→ 超时或被阻塞
+2. 等待超时（默认约 3 秒）
+3. 回退到 HTTPS 探测
+4. 尝试发送 ICMP 探测 → 通常也失败
+5. 记录日志 "UDP is blocked, trying HTTPS/ICMP"
+
+**发包量分析**：
+
+在未修复的情况下，每次 netcheck（约每 20-26 秒）会产生：
+- STUN 请求：每个 DERP 区域多个 UDP 包（尝试发送但失败）
+- ICMP 请求：每个 DERP 区域 1 个 ICMP 包（尝试发送）
+- HTTPS 请求：每个 DERP 区域 1 个 TLS 连接
+
+**修复后**（设置 `TS_DEBUG_ALWAYS_USE_DERP=1`）：
+- STUN 请求：完全不发送
+- ICMP 请求：完全不发送
+- HTTPS 请求：每个 DERP 区域 1 个 TLS 连接
+- 无 "UDP is blocked" 日志
+
 ## 总结
 
 对于 DLP 环境，推荐配置：
 
-**首选方案**：设置环境变量 `TS_DEBUG_ALWAYS_USE_DERP=1`
+### 场景一：Headscale 用户 - 仅特定节点需要 TLS-only（推荐）
+
+> ⚠️ **注意**：Headscale v0.27.0 及以下版本**不支持** `nodeAttrs` 功能。
+> 请使用**客户端环境变量方案**。
+
+**在需要 TLS-only 的特定节点上设置环境变量**：
+
+```bash
+# Linux (systemd)
+sudo mkdir -p /etc/systemd/system/tailscaled.service.d/
+echo -e "[Service]\nEnvironment=\"TS_DEBUG_ALWAYS_USE_DERP=1\"" | sudo tee /etc/systemd/system/tailscaled.service.d/override.conf
+sudo systemctl daemon-reload
+sudo systemctl restart tailscaled
+```
+
+**效果**：
+- ✅ 设置了环境变量的节点：禁用 STUN/ICMP，仅 TLS
+- ✅ 其他节点：正常使用 P2P、STUN、ICMP
+- ✅ 适用于 Headscale
+
+**验证**：
+```bash
+# 在 TLS-only 节点上
+tailscale netcheck  # STUN 测试应被跳过
+sudo tcpdump -i any udp port 3478  # 应无流量
+```
+
+### 场景二：官方 Tailscale 用户 - 仅特定节点需要 TLS-only
+
+官方 Tailscale 支持 `nodeAttrs`，可在 ACL 中配置：
+
+```json
+{
+  "nodeAttrs": [
+    {
+      "target": ["tag:dlp-node"],
+      "attr": ["only-tcp-443"]
+    }
+  ]
+}
+```
+
+### 场景三：所有节点都需要 TLS-only
+
+在所有节点上设置环境变量 `TS_DEBUG_ALWAYS_USE_DERP=1`
 
 这将：
 - ✅ 禁用点对点 UDP 连接
@@ -279,12 +622,49 @@ A: 修复后，两者在 netcheck 行为上是等效的：
 - ✅ 仅使用 HTTPS (TCP 443) 测量 DERP 延迟
 - ✅ 所有数据流量通过 DERP 中继
 
-**替代方案**：通过控制平面配置 `NodeAttrOnlyTCP443`（需要管理员权限）
+### 场景四：自建 DERP 使用非标准端口
 
-所有方案都确保实际数据流量仅通过 DERP 中继，不建立点对点连接。
+**DERP Map 配置**（通过控制面板下发）：
+
+```json
+{
+  "Regions": {
+    "900": {
+      "RegionID": 900,
+      "Nodes": [{
+        "HostName": "your-derp.example.com",
+        "DERPPort": 7080,
+        "STUNPort": -1
+      }]
+    }
+  },
+  "OmitDefaultRegions": true
+}
+```
+
+设置 `STUNPort: -1` 禁用所有 STUN，或设置有效端口（如 `7478`）允许非 TLS-only 节点使用 STUN。
+
+**在特定节点上设置 TLS-only**：
+
+```bash
+# 仅在需要 TLS-only 的节点上执行
+sudo mkdir -p /etc/systemd/system/tailscaled.service.d/
+echo -e "[Service]\nEnvironment=\"TS_DEBUG_ALWAYS_USE_DERP=1\"" | sudo tee /etc/systemd/system/tailscaled.service.d/override.conf
+sudo systemctl daemon-reload
+sudo systemctl restart tailscaled
+```
+
+**效果**：
+- ✅ 所有流量通过您的私有 DERP（自定义端口如 7080）
+- ✅ 设置了环境变量的节点：禁用 UDP/ICMP 探测
+- ✅ 其他节点：根据 DERP 的 STUNPort 配置决定是否可用 STUN
+- ✅ 不连接公共 Tailscale 服务器
+- ✅ 配置了 TLS-only 的节点不产生 "UDP is blocked" 日志
+
+所有方案都确保配置了 TLS-only 的节点数据流量仅通过 DERP 中继，不建立点对点连接。
 
 ---
 
 *文档版本：基于 Tailscale 源代码分析*
 *最后更新：2024*
-*注：包含 TS_DEBUG_ALWAYS_USE_DERP netcheck 行为修复*
+*注：包含 TS_DEBUG_ALWAYS_USE_DERP netcheck 行为修复；Headscale v0.27.0 不支持 nodeAttrs*
